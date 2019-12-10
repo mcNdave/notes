@@ -6,9 +6,12 @@ use Reflector, ReflectionClass, ReflectionProperty, ReflectionMethod;
 
 class ObjectReflection {
 
+    protected string $classname;
+
     public AnnotationReader $annotationReader;
 
     public function __construct($class, AnnotationReader $annotationReader = null) {
+        $this->classname = ltrim($class, '\\');
         $this->classReflection = $class instanceof ReflectionClass ? $class : new ReflectionClass($class);
         $this->annotationReader = $annotationReader ?: AnnotationReader::fromClass($class);
     }
@@ -18,40 +21,48 @@ class ObjectReflection {
         return new static($class);
     }
 
-    public function read() : array
+    public function read(bool $fullUses = true, bool $fullObject = true, $fullMethod = true, $fullProperty = true) : array
     {
         return [
-            'uses'     => $this->gatherUses(true),
-            'class'    => $this->gatherClass(true),
-            'method'   => $this->gatherMethods(true),
-            'property' => $this->gatherProperties(true),
+            'uses'     => $this->gatherUses($fullUses),
+            'class'    => $this->gatherClass($fullObject),
+            'method'   => $this->gatherMethods($fullMethod),
+            'property' => $this->gatherProperties($fullProperty),
         ];
     }
 
     public function gatherUses(bool $full = true) : array
     {
-        $list = [];
-
         if ( $full ) {
             if ( $parentClass = $this->classReflection->getParentClass() ) {
                 $list = static::fromClass($parentClass)->gatherUses(true);
             }
 
             foreach($this->classReflection->getTraits() as $trait) {
-                $list = array_merge($list, static::fromClass($trait)->gatherUses(true));
+                $list = array_replace(static::fromClass($trait)->gatherUses(true), $list ?? []);
             }
         }
 
-        return array_merge($this->getUsesStatements(), $list);
+        return array_replace($list ?? [], $this->getUsesStatements());
     }
 
     public function gatherClass(bool $full = true) : array
     {
-        $class = [];
-
         if ( $full ) {
             if ( $parentClass = $this->classReflection->getParentClass() ) {
                 $class = static::fromClass($parentClass)->gatherClass(true);
+            }
+
+            if ( $traits = $this->classReflection->getTraits() ) {
+                foreach($traits as $key => $value) {
+                    $traitTags = static::fromClass($key)->gatherClass(true);
+                }
+            }
+
+            if ( $interfaces = $this->classReflection->getInterfaces() ) {
+                foreach($interfaces as $key => $value) {
+                    $interfaceTags = static::fromClass($key)->gatherClass(true);
+                }
             }
 
             $itemName = function($item) {
@@ -59,12 +70,12 @@ class ObjectReflection {
             };
         }
 
-        return [
-            'tags' => array_merge($class, $this->annotationReader->getClass($this->classReflection))
+        return array_merge_recursive($class ?? [], $traitTags ?? [], $interfaceTags ?? [], [
+            'tags' => $this->annotationReader->getClass($this->classReflection)
         ] + ( ! $full ? [] : [
-            'traits' => array_map($itemName, $this->classReflection->getTraits()),
-            'interfaces' => array_map($itemName, $this->classReflection->getInterfaces()),
-        ]);
+            'traits' => array_map($itemName, $traits),
+            'interfaces' => array_map($itemName, $interfaces),
+        ] ));
     }
 
     public function gatherProperties(bool $full = true, int $filter =
@@ -73,7 +84,6 @@ class ObjectReflection {
         ReflectionProperty::IS_PRIVATE
     ) : array
     {
-        $properties = [];
         $defaultValues = $this->classReflection->getDefaultProperties();
 
         if ( $full ) {
@@ -82,11 +92,9 @@ class ObjectReflection {
             }
         }
 
-        $properties = array_merge($properties, $this->classReflection->getProperties($filter));
-
         $list = [];
 
-        foreach($properties as $property) {
+        foreach($this->classReflection->getProperties($filter) as $property) {
             $current = [
                 'name' => $property->getName()
             ];
@@ -110,7 +118,7 @@ class ObjectReflection {
             $list[ $current['name'] ] = $current;
         }
 
-        return $list;
+        return array_merge($properties ?? [], $list);
     }
 
     public function gatherMethods(bool $full = true, int $filter =
@@ -120,7 +128,7 @@ class ObjectReflection {
         ReflectionMethod::IS_STATIC
     ) : array
     {
-        $list = $methods = [];
+        $list = [];
 
         if ( $full ) {
             if ( $parentClass = $this->classReflection->getParentClass() ) {
@@ -128,9 +136,11 @@ class ObjectReflection {
             }
         }
 
-        $methods = array_merge($methods, $this->classReflection->getMethods($filter));
+        foreach($this->classReflection->getMethods($filter) as $method) {
+            if ( ! $full && ( $method->class !== $this->classname ) ) {
+                continue;
+            }
 
-        foreach($methods as $method) {
             $parameters = [];
 
             foreach($method->getParameters() as $parameter) {
@@ -162,7 +172,7 @@ class ObjectReflection {
             $list[ $current['name'] ] = $current;
         }
 
-        return $list;
+        return array_merge($methods ?? [], $list);
     }
 
     protected function ignoreElementAnnotation($tags) : bool
